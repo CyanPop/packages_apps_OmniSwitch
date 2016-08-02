@@ -19,6 +19,7 @@ package org.omnirom.omniswitch;
 
 import java.net.URISyntaxException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 
@@ -45,7 +46,6 @@ public class SwitchManager {
     private static final String TAG = "SwitchManager";
     private static final boolean DEBUG = false;
     private List<TaskDescription> mLoadedTasks;
-    private List<TaskDescription> mActiveTasks;
     private ISwitchLayout mLayout;
     private SwitchGestureView mGestureView;
     private Context mContext;
@@ -116,7 +116,6 @@ public class SwitchManager {
         }
 
         mLoadedTasks = new ArrayList<TaskDescription>();
-        mActiveTasks = new ArrayList<TaskDescription>();
         switchLayout();
         mGestureView = new SwitchGestureView(this, mContext);
     }
@@ -151,7 +150,6 @@ public class SwitchManager {
         }
         mLoadedTasks.clear();
         mLoadedTasks.addAll(taskList);
-        filterActiveTasks();
         mLayout.update();
         mGestureView.update();
     }
@@ -181,6 +179,7 @@ public class SwitchManager {
             } else {
                 am.moveTaskToFront(ad.getTaskId(), ActivityManager.MOVE_TASK_NO_USER_ACTION);
             }
+            SwitchStatistics.getInstance(mContext).traceStartIntent(ad.getIntent());
         } else {
             Intent intent = ad.getIntent();
             intent.addFlags(Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY
@@ -189,6 +188,7 @@ public class SwitchManager {
             if (DEBUG)
                 Log.v(TAG, "Starting activity " + intent);
             try {
+                SwitchStatistics.getInstance(mContext).traceStartIntent(intent);
                 mContext.startActivity(intent);
             } catch (SecurityException e) {
                 Log.e(TAG, "Recents does not have the permission to launch "
@@ -212,7 +212,6 @@ public class SwitchManager {
         }
         ad.setKilled();
         mLoadedTasks.remove(ad);
-        mActiveTasks.remove(ad);
         mLayout.refresh();
     }
 
@@ -254,7 +253,7 @@ public class SwitchManager {
         final ActivityManager am = (ActivityManager) mContext
                 .getSystemService(Context.ACTIVITY_SERVICE);
 
-        if (mActiveTasks.size() <= 1) {
+        if (getTasks().size() <= 1) {
             if(close){
                 hide(true);
             }
@@ -283,15 +282,15 @@ public class SwitchManager {
         final ActivityManager am = (ActivityManager) mContext
                 .getSystemService(Context.ACTIVITY_SERVICE);
 
-        if (mActiveTasks.size() == 0) {
+        if (getTasks().size() == 0) {
             if(close){
                 hide(true);
             }
             return;
         }
 
-        if (mActiveTasks.size() >= 1){
-            TaskDescription ad = mActiveTasks.get(0);
+        if (getTasks().size() >= 1){
+            TaskDescription ad = getTasks().get(0);
             am.removeTask(ad.getPersistentTaskId());
             if(DEBUG){
                 Log.d(TAG, "kill " + ad.getPackageName());
@@ -326,14 +325,14 @@ public class SwitchManager {
     }
 
     public void toggleLastApp(boolean close) {
-        if (mActiveTasks.size() < 2) {
+        if (getTasks().size() < 2) {
             if(close){
                 hide(true);
             }
             return;
         }
 
-        TaskDescription ad = mActiveTasks.get(1);
+        TaskDescription ad = getTasks().get(1);
         switchTask(ad, close, true);
     }
 
@@ -341,10 +340,14 @@ public class SwitchManager {
         if(close){
             hide(true);
         }
+        startIntentFromtString(mContext, intent);
+    }
 
+    public static void startIntentFromtString(Context context, String intent) {
         try {
             Intent intentapp = Intent.parseUri(intent, 0);
-            mContext.startActivity(intentapp);
+            SwitchStatistics.getInstance(context).traceStartIntent(intentapp);
+            context.startActivity(intentapp);
         } catch (URISyntaxException e) {
             Log.e(TAG, "URISyntaxException: [" + intent + "]");
         } catch (ActivityNotFoundException e){
@@ -363,32 +366,41 @@ public class SwitchManager {
 
     public void startApplicationDetailsActivity(String packageName) {
         hide(true);
+        startApplicationDetailsActivity(mContext, packageName);
+    }
 
+    public static void startApplicationDetailsActivity(Context context, String packageName) {
         Intent intent = new Intent(
-                Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts(
-                        "package", packageName, null));
-        intent.setComponent(intent.resolveActivity(mContext.getPackageManager()));
-        TaskStackBuilder.create(mContext)
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null));
+        intent.setComponent(intent.resolveActivity(context.getPackageManager()));
+        TaskStackBuilder.create(context)
                 .addNextIntentWithParentStack(intent).startActivities();
     }
 
-    public void startSettingssActivity() {
+    public void startSettingsActivity() {
         hide(true);
+        startSettingsActivity(mContext);
+    }
 
+    public static void startSettingsActivity(Context context) {
         Intent intent = new Intent(Settings.ACTION_SETTINGS, null);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                 | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
-        mContext.startActivity(intent);
+        context.startActivity(intent);
     }
 
     public void startOmniSwitchSettingsActivity() {
         hide(true);
+        startOmniSwitchSettingsActivity(mContext);
+    }
 
-        Intent mainActivity = new Intent(mContext,
+    public static void startOmniSwitchSettingsActivity(Context context) {
+        Intent mainActivity = new Intent(context,
                 SettingsActivity.class);
         mainActivity.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
                 | Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS);
-        mContext.startActivity(mainActivity);
+        context.startActivity(mainActivity);
     }
 
     public void shutdownService() {
@@ -412,23 +424,11 @@ public class SwitchManager {
     }
 
     public List<TaskDescription> getTasks() {
-        return mActiveTasks;
+	    return mLoadedTasks;
     }
 
     public void clearTasks() {
         mLoadedTasks.clear();
-        mActiveTasks.clear();
-    }
-
-    private void filterActiveTasks() {
-        mActiveTasks.clear();
-        Iterator<TaskDescription> nextTask = mLoadedTasks.iterator();
-        while(nextTask.hasNext()) {
-            TaskDescription ad = nextTask.next();
-            if (ad.isActive()) {
-                mActiveTasks.add(ad);
-            }
-        }
     }
 
     public void lockToCurrentApp(boolean close) {
@@ -578,5 +578,9 @@ public class SwitchManager {
         } catch (RemoteException e) {
         }
         return 2;
+    }
+
+    public void revertRecents() {
+        Collections.reverse(mLoadedTasks);
     }
 }

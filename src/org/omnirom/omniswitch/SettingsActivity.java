@@ -29,12 +29,15 @@ import org.omnirom.omniswitch.ui.SeekBarPreference;
 import org.omnirom.omniswitch.ui.SettingsGestureView;
 import org.omnirom.omniswitch.ui.FavoriteDialog;
 
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.os.Bundle;
+import android.preference.CheckBoxPreference;
 import android.preference.ListPreference;
 import android.preference.Preference;
 import android.preference.Preference.OnPreferenceChangeListener;
@@ -45,11 +48,11 @@ import android.preference.SwitchPreference;
 import android.util.Log;
 import android.view.Menu;
 import android.view.View;
-import android.view.View.OnClickListener;
 import android.widget.Switch;
+import android.widget.Toast;
 
 public class SettingsActivity extends PreferenceActivity implements
-        OnPreferenceChangeListener  {
+        OnPreferenceChangeListener, IEditFavoriteActivity  {
     private static final String TAG = "SettingsActivity";
 
     public static final String PREF_OPACITY = "opacity";
@@ -89,6 +92,11 @@ public class SettingsActivity extends PreferenceActivity implements
     public static final String PREF_THUMB_SIZE = "thumb_size";
     public static final String PREF_APP_FILTER_RUNNING = "app_filter_running";
     public static final String PREF_HANDLE_WIDTH = "handle_width";
+    public static final String PREF_LAUNCHER_MODE = "launcher_mode";
+    public static final String PREF_LAUNCH_STATS = "launch_stats";
+    public static final String PREF_LAUNCH_STATS_DELETE = "launch_stats_delete";
+    public static final String PREF_FAVORITE_APPS_CONFIG_STAT = "favorite_apps_config_stat";
+    public static final String PREF_REVERT_RECENTS ="revert_recents";
 
     public static int BUTTON_KILL_ALL = 0;
     public static int BUTTON_KILL_OTHER = 1;
@@ -135,6 +143,11 @@ public class SettingsActivity extends PreferenceActivity implements
     private ListPreference mAppFilterTime;
     private ListPreference mThumbSize;
     private SwitchPreference mEnable;
+    private SwitchPreference mLauncherMode;
+    private Preference mLaunchStatsDelete;
+    private SwitchPreference mLaunchStats;
+    private Preference mFavoriteAppsConfigStat;
+    private CheckBoxPreference mRevertRecents;
 
     @Override
     public void onPause() {
@@ -149,6 +162,7 @@ public class SettingsActivity extends PreferenceActivity implements
     @Override
     public void onResume() {
         mPrefs.registerOnSharedPreferenceChangeListener(mPrefsListener);
+        mEnable.setChecked(SwitchService.isRunning() && mPrefs.getBoolean(SettingsActivity.PREF_ENABLE, false));
         super.onResume();
     }
 
@@ -230,6 +244,13 @@ public class SettingsActivity extends PreferenceActivity implements
                 mThumbSize.getEntryValues()[2].toString()));
         mThumbSize.setValueIndex(idx);
         mThumbSize.setSummary(mThumbSize.getEntries()[idx]);
+        mLauncherMode = (SwitchPreference) findPreference(PREF_LAUNCHER_MODE);
+        mLaunchStats = (SwitchPreference) findPreference(PREF_LAUNCH_STATS);
+        mLaunchStatsDelete = (Preference) findPreference(PREF_LAUNCH_STATS_DELETE);
+        mFavoriteAppsConfigStat = (Preference) findPreference(PREF_FAVORITE_APPS_CONFIG_STAT);
+        mRevertRecents = (CheckBoxPreference) findPreference(PREF_REVERT_RECENTS);
+        mRevertRecents.setEnabled(mLayoutStyle.getValue().equals("1"));
+        mThumbSize.setEnabled(mLayoutStyle.getValue().equals("1"));
 
         mPrefsListener = new SharedPreferences.OnSharedPreferenceChangeListener() {
             public void onSharedPreferenceChanged(SharedPreferences prefs,
@@ -287,8 +308,38 @@ public class SettingsActivity extends PreferenceActivity implements
             String favoriteListString = mPrefs.getString(PREF_FAVORITE_APPS, "");
             List<String> favoriteList = new ArrayList<String>();
             Utils.parseFavorites(favoriteListString, favoriteList);
-            FavoriteDialog dialog = new FavoriteDialog(this, favoriteList);
-            dialog.show();
+            doShowFavoritesList(favoriteList);
+            return true;
+        } else if (preference == mFavoriteAppsConfigStat) {
+            final List<String> favoriteList = Utils.getFavoriteListFromStats(this, 10);
+            if (favoriteList.size() < 5) {
+                new AlertDialog.Builder(this)
+                    .setTitle(R.string.launch_stats_low_title)
+                    .setMessage(R.string.launch_stats_low_notice)
+                    .setCancelable(true)
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .setPositiveButton(android.R.string.ok,
+                            new DialogInterface.OnClickListener() {
+                                @Override
+                                public void onClick(DialogInterface dialog, int which) {
+                                    doShowFavoritesList(favoriteList);
+                                }
+                            }).show();
+            } else {
+                doShowFavoritesList(favoriteList);
+            }
+            return true;
+        } else if (preference == mLauncherMode){
+            Utils.enableLauncherMode(this, mLauncherMode.isChecked());
+            return true;
+        } else if (preference == mLaunchStats) {
+            if (!mLaunchStats.isChecked()) {
+                SwitchStatistics.getInstance(this).clear();
+            }
+            return true;
+        } else if (preference == mLaunchStatsDelete) {
+            SwitchStatistics.getInstance(this).clear();
+            Toast.makeText(SettingsActivity.this, R.string.launch_stats_delete_notice, Toast.LENGTH_LONG).show();
             return true;
         }
         return false;
@@ -329,6 +380,8 @@ public class SettingsActivity extends PreferenceActivity implements
             int idx = mLayoutStyle.findIndexOfValue(value);
             mLayoutStyle.setSummary(mLayoutStyle.getEntries()[idx]);
             mLayoutStyle.setValueIndex(idx);
+            mRevertRecents.setEnabled(mLayoutStyle.getValue().equals("1"));
+            mThumbSize.setEnabled(mLayoutStyle.getValue().equals("1"));
             return true;
         } else if (preference == mAppFilterTime) {
             String value = (String) newValue;
@@ -345,11 +398,15 @@ public class SettingsActivity extends PreferenceActivity implements
         } else if (preference == mEnable) {
             boolean value = ((Boolean) newValue).booleanValue();
             startOmniSwitch(value);
+            if (!value && mLauncherMode.isChecked()) {
+                Toast.makeText(SettingsActivity.this, R.string.launcher_mode_enable_check, Toast.LENGTH_LONG).show();
+            }
             return true;
         }
         return false;
     }
 
+    @Override
     public void applyChanges(List<String> favoriteList){
         mPrefs.edit()
                 .putString(PREF_FAVORITE_APPS,
@@ -365,7 +422,7 @@ public class SettingsActivity extends PreferenceActivity implements
         mButtonImages[2]=BitmapUtils.colorize(getResources(), Color.GRAY, getResources().getDrawable(R.drawable.lastapp));
         mButtonImages[3]=BitmapUtils.colorize(getResources(), Color.GRAY, getResources().getDrawable(R.drawable.ic_sysbar_home));
         mButtonImages[4]=BitmapUtils.colorize(getResources(), Color.GRAY, getResources().getDrawable(R.drawable.settings));
-        mButtonImages[5]=BitmapUtils.colorize(getResources(), Color.GRAY, getResources().getDrawable(R.drawable.ic_allapps));
+        mButtonImages[5]=BitmapUtils.colorize(getResources(), Color.GRAY, getResources().getDrawable(R.drawable.ic_apps_white_48dp));
         mButtonImages[6]=BitmapUtils.colorize(getResources(), Color.GRAY, getResources().getDrawable(R.drawable.ic_sysbar_back));
         mButtonImages[7]=BitmapUtils.colorize(getResources(), Color.GRAY, getResources().getDrawable(R.drawable.lock_app_pin));
         mButtonImages[8]=BitmapUtils.colorize(getResources(), Color.GRAY, getResources().getDrawable(R.drawable.ic_close));
@@ -392,22 +449,6 @@ public class SettingsActivity extends PreferenceActivity implements
         }
     }
 
-    /*@Override
-    public boolean onCreateOptionsMenu(Menu menu) {
-        Log.d(TAG, "onCreateOptionsMenu");
-        getMenuInflater().inflate(R.menu.settings_menu, menu);
-        mToggleServiceSwitch = (Switch) menu.findItem(R.id.toggle_service).getActionView().findViewById(R.id.switch_item);
-        mToggleServiceSwitch.setChecked(SwitchService.isRunning() && mPrefs.getBoolean(SettingsActivity.PREF_ENABLE, false));
-        mToggleServiceSwitch.setOnClickListener(new OnClickListener(){
-            @Override
-            public void onClick(View v) {
-                boolean value = ((Switch)v).isChecked();
-                startOmniSwitch(value);
-                mPrefs.edit().putBoolean(PREF_ENABLE, value).commit();
-            }});
-        return true;
-    }*/
-
     public void updatePrefs(SharedPreferences prefs, String key) {
         if (!SwitchService.isRunning()){
             IconPackHelper.getInstance(SettingsActivity.this).updatePrefs(mPrefs, null);
@@ -416,7 +457,6 @@ public class SettingsActivity extends PreferenceActivity implements
 
     private void startOmniSwitch(boolean value) {
         Intent svc = new Intent(SettingsActivity.this, SwitchService.class);
-        Log.d(TAG, "toggle service " + value);
         if (value) {
             if (SwitchService.isRunning()){
                 stopService(svc);
@@ -427,5 +467,10 @@ public class SettingsActivity extends PreferenceActivity implements
                 stopService(svc);
             }
         }
+    }
+
+    private void doShowFavoritesList(List<String> favoriteList) {
+        FavoriteDialog dialog = new FavoriteDialog(this, this, favoriteList);
+        dialog.show();
     }
 }

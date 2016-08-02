@@ -17,11 +17,13 @@
  */
 package org.omnirom.omniswitch;
 
+import org.omnirom.omniswitch.launcher.Launcher;
 import org.omnirom.omniswitch.ui.BitmapCache;
 import org.omnirom.omniswitch.ui.IconPackHelper;
 
 import android.app.Notification;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.app.Service;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -29,23 +31,30 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.res.Configuration;
+import android.os.Build;
 import android.os.IBinder;
 import android.os.UserHandle;
 import android.preference.PreferenceManager;
+import android.provider.Settings;
 import android.util.Log;
+
+import java.util.Set;
+import java.util.HashSet;
 
 public class SwitchService extends Service {
     private final static String TAG = "SwitchService";
     private static boolean DEBUG = false;
 
     private static final int START_SERVICE_ERROR_ID = 0;
+    private static final int START_PERMISSION_SETTINGS_ID = 1;
 
     private RecentsReceiver mReceiver;
-    private SwitchManager mManager;
+    private static SwitchManager mManager;
     private SharedPreferences mPrefs;
     private SharedPreferences.OnSharedPreferenceChangeListener mPrefsListener;
     private SwitchConfiguration mConfiguration;
     private int mUserId = -1;
+    private Set<String> mPrefKeyFilter = new HashSet<String>();
 
     private static boolean mIsRunning;
     private static boolean mCommitSuicide;
@@ -61,6 +70,11 @@ public class SwitchService extends Service {
             mConfiguration = SwitchConfiguration.getInstance(this);
             mConfiguration.initDefaults(this);
 
+            if (!canDrawOverlayViews()) {
+                createOverlayNotification();
+                commitSuicide();
+                return;
+            }
             if(mConfiguration.mRestrictedMode){
                 createErrorNotification();
             }
@@ -68,7 +82,13 @@ public class SwitchService extends Service {
             Log.d(TAG, "started SwitchService " + mUserId);
 
             mPrefs = PreferenceManager.getDefaultSharedPreferences(this);
-
+            mPrefKeyFilter.add(SettingsActivity.PREF_SHOW_FAVORITE);
+            mPrefKeyFilter.add(Launcher.WECLOME_SCREEN_DISMISSED);
+            mPrefKeyFilter.add(Launcher.STATE_ESSENTIALS_EXPANDED);
+            mPrefKeyFilter.add(Launcher.STATE_PANEL_SHOWN);
+            if (DEBUG) {
+                Log.d(TAG, "mPrefKeyFilter " + mPrefKeyFilter);
+            }
             String layoutStyle = mPrefs.getString(SettingsActivity.PREF_LAYOUT_STYLE, "1");
             mManager = new SwitchManager(this, Integer.valueOf(layoutStyle));
 
@@ -99,7 +119,9 @@ public class SwitchService extends Service {
             };
 
             mPrefs.registerOnSharedPreferenceChangeListener(mPrefsListener);
-
+            if (mConfiguration.mLaunchStatsEnabled) {
+                SwitchStatistics.getInstance(this).loadStatistics();
+            }
             mIsRunning = true;
         } catch(Exception e) {
             Log.e(TAG, "onCreate", e);
@@ -123,14 +145,13 @@ public class SwitchService extends Service {
             mManager.shutdownService();
         }
 
+        if (mConfiguration.mLaunchStatsEnabled) {
+            SwitchStatistics.getInstance(this).saveStatistics();
+        }
         mIsRunning = false;
         BitmapCache.getInstance(this).clear();
 
-        if (mCommitSuicide) {
-            mCommitSuicide = false;
-            // to get the "app has stopped alert"
-            throw new RuntimeException("Failed to start OmniSwitch");
-        }
+        mCommitSuicide = false;
     }
 
     @Override
@@ -210,7 +231,12 @@ public class SwitchService extends Service {
     }
 
     public void updatePrefs(SharedPreferences prefs, String key) {
-        // MUST be before the rest
+        if (isFilteredPrefsChange(key)) {
+            return;
+        }
+        if(DEBUG){
+            Log.d(TAG, "updatePrefs " + key);
+        }
         IconPackHelper.getInstance(this).updatePrefs(prefs, key);
         mConfiguration.updatePrefs(prefs, key);
         mManager.updatePrefs(prefs, key);
@@ -234,15 +260,56 @@ public class SwitchService extends Service {
                 .setContentTitle("OmniSwitch restricted mode")
                 .setContentText("Failed to gain system permissions")
                 .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setShowWhen(false)
                 .build();
+        notificationManager.cancel(START_SERVICE_ERROR_ID);
         notificationManager.notify(START_SERVICE_ERROR_ID, notifyDetails);
     }
 
-    private void commitSuicide() {
+    private void disableAutoStart() {
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
         prefs.edit().putBoolean(SettingsActivity.PREF_ENABLE, false).commit();
+    }
+
+    private void commitSuicide() {
+        disableAutoStart();
         mCommitSuicide = true;
         Intent stopIntent = new Intent(this, SwitchService.class);
         stopService(stopIntent);
+    }
+
+    /**
+     * fugly but save since the service is actually a singleton
+     */
+    public static SwitchManager getRecentsManager() {
+        return mManager;
+    }
+
+    private boolean isFilteredPrefsChange(String key) {
+        return mPrefKeyFilter.contains(key);
+    }
+
+    private void createOverlayNotification() {
+        final NotificationManager notificationManager = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
+
+        PendingIntent settingsIntent = PendingIntent.getActivity(this, START_PERMISSION_SETTINGS_ID,
+                new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION)
+                        .setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_USER_ACTION),
+                PendingIntent.FLAG_UPDATE_CURRENT);
+
+        final Notification notifyDetails = new Notification.Builder(this)
+                .setContentTitle(getResources().getString(R.string.dialog_overlay_perms_title))
+                .setContentText(getResources().getString(R.string.dialog_overlay_perms_msg))
+                .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                .setContentIntent(settingsIntent)
+                .setShowWhen(false)
+                .build();
+
+        notificationManager.cancel(START_SERVICE_ERROR_ID);
+        notificationManager.notify(START_SERVICE_ERROR_ID, notifyDetails);
+    }
+
+    private boolean canDrawOverlayViews() {
+        return Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this);
     }
 }
